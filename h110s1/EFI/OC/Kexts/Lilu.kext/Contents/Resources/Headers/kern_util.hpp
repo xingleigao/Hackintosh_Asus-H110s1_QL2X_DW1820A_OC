@@ -10,14 +10,15 @@
 
 #include <Headers/kern_config.hpp>
 #include <Headers/kern_compat.hpp>
-#include <Headers/kern_atomic.hpp>
 
 #include <libkern/libkern.h>
+#include <libkern/c++/OSObject.h>
 #include <libkern/OSDebug.h>
 #include <mach/vm_types.h>
 #include <mach/vm_prot.h>
 #include <sys/proc.h>
 #include <IOKit/IOLib.h>
+#include <stdatomic.h>
 
 #define xStringify(a) Stringify(a)
 #define Stringify(a) #a
@@ -73,10 +74,10 @@ extern proc_t kernproc;
  *  @param cond  precondition
  *  @param str   printf-like string
  */
-#define SYSLOG_COND(cond, module, str, ...)                                                                \
-	do {                                                                                                   \
-	    if (cond)                                                                                          \
-	        lilu_os_log( "%s%10s" str "\n", xStringify(PRODUCT_NAME) ": ", module " @ ", ## __VA_ARGS__);  \
+#define SYSLOG_COND(cond, module, str, ...)                                                                			  \
+	do {                                                                                                   			  \
+	    if (cond)                                                                                          			  \
+	        lilu_os_log( "%s%10s: @ " str "\n", xStringify(PRODUCT_NAME), safeString(module), ## __VA_ARGS__);		  \
 	} while (0)
 
 /**
@@ -94,12 +95,12 @@ extern proc_t kernproc;
  *  @param module log module
  *  @param str    printf-like string
  */
-#define SYSTRACE_COND(cond, module, str, ...)                                                                        \
-	do {                                                                                                             \
-	    if (cond) {                                                                                                  \
-	        SYSLOG(module, str, ## __VA_ARGS__);                                                                     \
-		    OSReportWithBacktrace( "%s%10s" str "\n", xStringify(PRODUCT_NAME) ": ", module " @ ", ## __VA_ARGS__);  \
-	    }                                                                                                            \
+#define SYSTRACE_COND(cond, module, str, ...)                                                                        			 \
+	do {                                                                                                             			 \
+	    if (cond) {                                                                                                  			 \
+	        SYSLOG(module, str, ## __VA_ARGS__);                                                                     			 \
+		    OSReportWithBacktrace( "%s%10s: @ " str "\n", xStringify(PRODUCT_NAME), safeString(module), ## __VA_ARGS__);			 \
+	    }                                                                                                            			 \
 	} while (0)
 
 /**
@@ -117,12 +118,12 @@ extern proc_t kernproc;
  *  @param module log module
  *  @param str    printf-like string
  */
-#define PANIC_COND(cond, module, str, ...)                                                             \
-	do {                                                                                               \
-	    if (cond) {                                                                                    \
-	        (panic)( "%s%10s" str "\n", xStringify(PRODUCT_NAME) ": ", module " @ ", ## __VA_ARGS__);  \
-	        UNREACHABLE();                                                                             \
-	    }                                                                                              \
+#define PANIC_COND(cond, module, str, ...)                                                             		\
+	do {                                                                                               		\
+	    if (cond) {                                                                                    		\
+	        (panic)( "%s%10s: @ " str "\n", xStringify(PRODUCT_NAME), safeString(module), ## __VA_ARGS__);  \
+	        UNREACHABLE();                                                                             		\
+	    }                                                                                              		\
 	} while (0)
 
 /**
@@ -251,6 +252,12 @@ extern proc_t kernproc;
 #define NONNULL __attribute__((nonnull))
 
 /**
+ *  Compiler hints regarding branching
+ */
+#define LIKELY(x) __builtin_expect(!!(x), 1)
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
+
+/**
  *  This function is supposed to workaround missing entries in the system log.
  *  By providing its own buffer for logging data.
  *
@@ -290,6 +297,29 @@ EXPORT char *strrchr(const char *stack, int ch);
 EXPORT void qsort(void *a, size_t n, size_t es, int (*cmp)(const void *, const void *));
 
 /**
+ *  Portable implementation of memmem function performing byte sequence (needle) search in another byte sequence (haystack).
+ *
+ *  @param h0    haystack
+ *  @param k    haystack size
+ *  @param n0   needle
+ *  @param l  needle size
+ *
+ *  @return pointer to found sequence or NULL
+ */
+EXPORT void *lilu_os_memmem(const void *h0, size_t k, const void *n0, size_t l);
+
+/**
+ *  Portable implementation of memchr function performing byte search in a byte sequence.
+ *
+ *  @param src    source to search in
+ *  @param c    byte to find
+ *  @param n   source size in bytes
+ *
+ *  @return pointer to found byte or NULL
+ */
+EXPORT void *lilu_os_memchr(const void *src, int c, size_t n);
+
+/**
  *  Count array elements
  *
  *  @param array   Array to process
@@ -313,10 +343,44 @@ extern "C" {
 	EXPORT void lilu_os_free(void *addr);
 }
 
+#if defined(__i386__)
+/**
+ *  ml_get_interrupts_enabled implementation as ml_get_interrupts_enabled is not exported on 10.5 or older
+ */
+inline bool lilu_get_interrupts_enabled() {
+	uint32_t flags;
+
+	__asm__ volatile ("pushf; pop	%0" :  "=r" (flags));
+	return (flags & EFL_IF) != 0;
+}
+
+/**
+ *  Wrapper around PE_parse_boot_arg as PE_parse_boot_argn is not exported in 10.4
+ */
+inline bool lilu_get_boot_args(const char *arg_string, void *arg_ptr, int max_len) {
+	return PE_parse_boot_arg(arg_string, arg_ptr);
+}
+
+/**
+ *  Implementation of strlcpy for 32-bit as strlcpy is not exported in 10.4
+ */
+EXPORT size_t lilu_strlcpy(char *dst, const char *src, size_t siz);
+
+#elif defined(__x86_64__)
+#define lilu_get_interrupts_enabled   ml_get_interrupts_enabled
+#define lilu_get_boot_args            PE_parse_boot_argn
+#define lilu_strlcpy                  strlcpy
+
+#else
+#error Unsupported arch.
+#endif
+
 /**
  *  Known kernel versions
  */
 enum KernelVersion {
+	Tiger         = 8,
+	Leopard       = 9,
 	SnowLeopard   = 10,
 	Lion          = 11,
 	MountainLion  = 12,
@@ -327,6 +391,9 @@ enum KernelVersion {
 	HighSierra    = 17,
 	Mojave        = 18,
 	Catalina      = 19,
+	BigSur        = 20,
+	Monterey      = 21,
+	Ventura       = 22,
 };
 
 /**
@@ -361,7 +428,7 @@ inline KernelMinorVersion getKernelMinorVersion() {
  */
 inline bool checkKernelArgument(const char *name) {
 	int val[16];
-	return PE_parse_boot_argn(name, val, sizeof(val));
+	return lilu_get_boot_args(name, val, sizeof(val));
 }
 
 /**
@@ -506,6 +573,14 @@ template <typename T>
 inline T FunctionCast(T org, mach_vm_address_t ptr) {
 	return reinterpret_cast<T>(ptr);
 }
+
+/**
+ *  Reference cleaner
+ */
+template<class T> struct remove_reference      {typedef T type;};
+template<class T> struct remove_reference<T&>  {typedef T type;};
+template<class T> struct remove_reference<T&&> {typedef T type;};
+
 
 /**
  *  Typed buffer allocator
@@ -703,14 +778,15 @@ struct ppair {
 
 /**
  *  Embedded vector-like container
- *  You muse call deinit before destruction
+ *  You must call deinit before destruction
  *  Ugh, someone, please, port libc++ to XNU...
  *
  *  @param T        held type
+ *  @param P        destructible type
  *  @param deleter  type destructor
  */
-template <typename T, void (*deleter)(T)=emptyDeleter<T>>
-class evector {
+template <typename T, typename P, void (*deleter)(P)=emptyDeleter<P>>
+class evector_base {
 	T *ptr {nullptr};
 	size_t cnt {0};
 	size_t rsvd {0};
@@ -842,9 +918,9 @@ public:
 		return false;
 	}
 
-	evector() = default;
-	evector(const evector &) = delete;
-	evector operator =(const evector &) = delete;
+	evector_base() = default;
+	evector_base(const evector_base &) = delete;
+	evector_base operator =(const evector_base &) = delete;
 
 	/**
 	 * Free the used memory
@@ -861,57 +937,285 @@ public:
 };
 
 /**
- *  Slightly non-standard helpers to get the date in a YYYY-MM-DD format.
+*  Embedded vector-like container, simplified specialisation
+*  You must call deinit before destruction
+*
+*  @param T        held type
+*  @param deleter  type destructor
+*/
+template <typename T, void (*deleter)(T)=emptyDeleter<T>>
+class evector : public evector_base<typename remove_reference<T>::type, T, deleter> { };
+
+/**
+ *  Represents a circular buffer protected by a recursive mutex lock
  */
-template <size_t i>
-inline constexpr char getBuildYear() {
-	static_assert(i < 4, "Year consists of four digits");
-	return __DATE__[7+i];
-}
-
-template <size_t i>
-inline constexpr char getBuildMonth() {
-	static_assert(i < 2, "Month consists of two digits");
-	auto mon = static_cast<uint32_t>(__DATE__[0])
-		| (static_cast<uint32_t>(__DATE__[1]) << 8U)
-		| (static_cast<uint32_t>(__DATE__[2]) << 16U)
-		| (static_cast<uint32_t>(__DATE__[3]) << 24U);
-	switch (mon) {
-		case ' naJ':
-			return "01"[i];
-		case ' beF':
-			return "02"[i];
-		case ' raM':
-			return "03"[i];
-		case ' rpA':
-			return "04"[i];
-		case ' yaM':
-			return "05"[i];
-		case ' nuJ':
-			return "06"[i];
-		case ' luJ':
-			return "07"[i];
-		case ' guA':
-			return "08"[i];
-		case ' peS':
-			return "09"[i];
-		case ' tcO':
-			return "10"[i];
-		case ' voN':
-			return "11"[i];
-		case ' ceD':
-			return "12"[i];
-		default:
-			return '0';
+template <typename T>
+struct CircularBuffer {
+private:
+	/**
+	 *  The internal storage
+	 */
+	T *storage {nullptr};
+	
+	/**
+	 *  The buffer capacity
+	 */
+	IOItemCount size {0};
+	
+	/**
+	 *  The current index for the next read operation
+	 */
+	IOItemCount indexr {0};
+	
+	/**
+	 *  The current index for the next write operation
+	 */
+	IOItemCount indexw {0};
+	
+	/**
+	 *  The current number of elements in the buffer
+	 */
+	IOItemCount count {0};
+	
+	/**
+	 *  The recursive mutex lock that protects the buffer
+	 */
+	IORecursiveLock *lock {nullptr};
+	
+public:
+	/**
+	 *  Initialize a circular buffer
+	 *
+	 *  @param buffer A non-null storage buffer
+	 *  @param capacity The total number of elements
+	 *  @return `true` on success, `false` otherwise.
+	 *  @warning The caller is responsbile for managing the lifecycle of the given storage buffer.
+	 */
+	bool init(T *buffer, IOItemCount capacity) {
+		storage = buffer;
+		size = capacity;
+		lock = IORecursiveLockAlloc();
+		return lock != nullptr;
 	}
-}
+	
+	/**
+	 *  Initialize a circular buffer
+	 *
+	 *  @param storage A storage buffer
+	 *  @return `true` on success, `false` otherwise.
+	 *  @warning The caller is responsbile for managing the lifecycle of the given storage buffer.
+	 */
+	template <size_t N>
+	bool init(T (&storage)[N]) {
+		return init(storage, N);
+	}
+	
+	/**
+	 *  Deinitialize the circular buffer
+	 */
+	void deinit() {
+		IORecursiveLockFree(lock);
+	}
+	
+	/**
+	 *  Create a circular buffer with the given capacity
+	 *
+	 *  @param size The total number of elements
+	 *  @return A non-null instance on success, `nullptr` if no memory.
+	 *  @warning The caller must invoke `CircularBuffer::destory()` to release the returned buffer.
+	 */
+	static CircularBuffer<T> *withCapacity(IOItemCount size) {
+		auto storage = Buffer::create<T>(size);
+		if (storage == nullptr)
+			return nullptr;
+		
+		auto instance = new CircularBuffer<T>();
+		if (instance == nullptr) {
+			Buffer::deleter(storage);
+			return nullptr;
+		}
+		
+		if (!instance->init(storage, size)) {
+			delete instance;
+			Buffer::deleter(storage);
+			return nullptr;
+		}
+		
+		return instance;
+	}
+	
+	/**
+	 *  Destroy the given circular buffer
+	 *
+	 *  @param buffer A non-null circular buffer returned by `CircularBuffer::withCapacity()`.
+	 */
+	static void deleter(CircularBuffer<T> *buffer NONNULL) {
+		Buffer::deleter(buffer->storage);
+		buffer->deinit();
+		delete buffer;
+	}
+	
+	/**
+	 *  Destory the given circular buffer if it is non-null and set it to nullptr
+	 *
+	 *  @param buffer A nullable circular buffer returned by `CircularBuffer::withCapacity()`.
+	 *  @note This function mimics the macro `OSSafeReleaseNULL()`.
+	 */
+	static void safeDeleter(CircularBuffer<T> *&buffer) {
+		if (buffer != nullptr) {
+			deleter(buffer);
+			buffer = nullptr;
+		}
+	}
+	
+	/**
+	 *  Check whether the circular buffer is empty
+	 *
+	 *  @return `true` if the buffer is empty, `false` otherwise.
+	 */
+	bool isEmpty() {
+		IORecursiveLockLock(lock);
+		bool retVal = (count == 0) && (indexr == indexw);
+		IORecursiveLockUnlock(lock);
+		return retVal;
+	}
+	
+	/**
+	 *  Check whether the circular buffer is full
+	 *
+	 *  @return `true` if the buffer is full, `false` otherwise.
+	 */
+	bool isFull() {
+		IORecursiveLockLock(lock);
+		bool retVal = (count == size) && (indexr == indexw);
+		IORecursiveLockUnlock(lock);
+		return retVal;
+	}
+	
+	/**
+	 *  Get the number of elements in the circular buffer
+	 *
+	 *  @return The current number of elements in the buffer.
+	 */
+	IOItemCount getCount() {
+		IORecursiveLockLock(lock);
+		IOItemCount retVal = count;
+		IORecursiveLockUnlock(lock);
+		return retVal;
+	}
+	
+	/**
+	 *  Write the given element to the circular buffer
+	 *
+	 *  @param element The element to write
+	 *  @return `true` on success, `false` if the buffer is full.
+	 */
+	bool push(const T &element) {
+		IORecursiveLockLock(lock);
+		if (isFull()) {
+			IORecursiveLockUnlock(lock);
+			return false;
+		}
+		storage[indexw] = element;
+		indexw += 1;
+		indexw %= size;
+		count += 1;
+		IORecursiveLockUnlock(lock);
+		return true;
+	}
+	
+	/**
+	 *  Read the next element from the circular buffer
+	 *
+	 *  @param element The element read from the buffer
+	 *  @return `true` on success, `false` if the buffer is empty.
+	 */
+	bool pop(T& element) {
+		IORecursiveLockLock(lock);
+		if (isEmpty()) {
+			IORecursiveLockUnlock(lock);
+			return false;
+		}
+		element = storage[indexr];
+		indexr += 1;
+		indexr %= size;
+		count -= 1;
+		IORecursiveLockUnlock(lock);
+		return true;
+	}
+};
 
-template <size_t i>
-inline constexpr char getBuildDay() {
-	static_assert(i < 2, "Day consists of two digits");
-	if (i == 0 && __DATE__[4+i] == ' ')
-		return '0';
-	return __DATE__[4+i];
+/**
+ *  Wrap an object that is not an instance of OSObject
+ */
+class EXPORT OSObjectWrapper: public OSObject {
+	/**
+	 *  Constructors & Destructors
+	 */
+	OSDeclareDefaultStructors(OSObjectWrapper);
+	
+	using super = OSObject;
+	
+	/**
+	 *  Wrapped object
+	 */
+	void *object {nullptr};
+	
+public:
+	/**
+	 *  Initialize the wrapper with the given object
+	 *
+	 *  @param object The wrapped object that is not an `OSObject`
+	 *  @return `true` on success, `false` otherwise.
+	 */
+	EXPORT bool init(void *object);
+	
+	/**
+	 *  Reinterpret the wrapped object as the given type
+	 *
+	 *  @return The wrapped object of the given type.
+	 */
+	template <typename T>
+	T *get() {
+		return reinterpret_cast<T *>(object);
+	}
+	
+	/**
+	 *  Create a wrapper for the given object that is not an `OSObject`
+	 *
+	 *  @param object A non-null object
+	 *  @return A non-null wrapper on success, `nullptr` otherwise.
+	 *  @warning The caller is responsbile for managing the lifecycle of the given object.
+	 */
+	EXPORT static OSObjectWrapper *with(void *object);
+};
+
+namespace Value {
+	template <typename T>
+	struct Value {
+		const T &value;
+
+		explicit Value(const T &value) : value(value) {}
+
+	#if __cplusplus >= 201703L
+		// Available as of C++17
+		template<typename... Ts>
+		bool isOneOf(const Ts&... args) {
+			return ((value == args) || ...);
+		}
+
+		// Available as of C++17
+		template <typename... Ts>
+		bool isNotOneOf(const Ts&... args) {
+			return ((value != args) && ...);
+		}
+	#endif
+	};
+	
+	template <typename T>
+	static Value<T> of(const T &value) {
+		return Value<T>(value);
+	}
 }
 
 #endif /* kern_util_hpp */
